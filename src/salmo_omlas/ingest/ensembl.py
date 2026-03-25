@@ -42,8 +42,12 @@ def _biomart_xml(attributes: list[str], filters: list[tuple[str, str]] | None = 
     )
 
 
-def biomart_tsv(query_xml: str) -> pd.DataFrame:
-    """POST BioMart query; return DataFrame."""
+def biomart_tsv(query_xml: str, attributes: list[str] | None = None) -> pd.DataFrame:
+    """POST BioMart query; return DataFrame.
+
+    If *attributes* is given, override the BioMart display-name headers with
+    the internal attribute names (column order matches the query order).
+    """
     r = requests.post(
         BIOMART_URL,
         data={"query": query_xml},
@@ -55,7 +59,10 @@ def biomart_tsv(query_xml: str) -> pd.DataFrame:
     if not raw.strip() or raw.strip().lower().startswith("error"):
         raise RuntimeError(f"BioMart error: {raw[:500]}")
     save_raw(f"biomart_{now_iso().replace(':', '-')}.tsv", raw)
-    return pd.read_csv(io.StringIO(raw), sep="\t", dtype=str, na_filter=False)
+    df = pd.read_csv(io.StringIO(raw), sep="\t", dtype=str, na_filter=False)
+    if attributes and len(attributes) == len(df.columns):
+        df.columns = attributes
+    return df
 
 
 def fetch_genes(limit: int | None = None) -> pd.DataFrame:
@@ -70,18 +77,15 @@ def fetch_genes(limit: int | None = None) -> pd.DataFrame:
         "description",
     ]
     xml = _biomart_xml(attrs)
-    df = biomart_tsv(xml)
+    df = biomart_tsv(xml, attributes=attrs)
     df.columns = [str(c).strip() for c in df.columns]
     df = df.rename(
         columns={
-            "ensembl_gene_id": "ensembl_gene_id",
             "external_gene_name": "symbol",
             "gene_biotype": "biotype",
             "chromosome_name": "chromosome",
             "start_position": "start",
             "end_position": "end",
-            "strand": "strand",
-            "description": "description",
         }
     )
     for c in ("start", "end", "strand"):
@@ -101,12 +105,10 @@ def fetch_gene_go() -> pd.DataFrame:
         "namespace_1003",
     ]
     xml = _biomart_xml(attrs)
-    df = biomart_tsv(xml)
+    df = biomart_tsv(xml, attributes=attrs)
     df.columns = [c.strip() for c in df.columns]
     rename = {
-        "ensembl_gene_id": "ensembl_gene_id",
         "external_gene_name": "symbol",
-        "go_id": "go_id",
         "name_1006": "go_name",
         "namespace_1003": "go_namespace",
     }
@@ -129,7 +131,7 @@ def fetch_orthologs() -> pd.DataFrame:
         "hsapiens_homolog_associated_gene_name",
     ]
     xml = _biomart_xml(attrs)
-    df = biomart_tsv(xml)
+    df = biomart_tsv(xml, attributes=attrs)
     df.columns = [c.strip() for c in df.columns]
     return df
 
