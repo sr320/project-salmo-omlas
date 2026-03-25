@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "salmo-omlas"
+version = "0.1.0"
+description = "Atlantic salmon gene regulatory interaction database"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31.0",
+  "pandas>=2.0.0",
+  "pybiomart>=0.2.0",
+  "click>=8.1.0",
+  "streamlit>=1.28.0",
+  "biopython>=1.83",
+  "networkx>=3.2",
+  "plotly>=5.18.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4.0", "jupyter>=1.0.0", "ipykernel>=6.29.0"]
+
+[project.scripts]
+salmo-omlas = "salmo_omlas.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

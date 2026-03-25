@@ -1,0 +1,20 @@
+# Core
+requests>=2.31.0
+pandas>=2.0.0
+pybiomart>=0.2.0
+
+# CLI & web
+click>=8.1.0
+streamlit>=1.28.0
+
+# Bio / CRISPR
+biopython>=1.83
+
+# Analysis & viz
+networkx>=3.2
+plotly>=5.18.0
+
+# Notebooks & tests
+jupyter>=1.0.0
+ipykernel>=6.29.0
+pytest>=7.4.0
