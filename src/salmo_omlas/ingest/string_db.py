@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import sqlite3
+import time
 
 import pandas as pd
 import requests
@@ -12,22 +13,38 @@ from salmo_omlas.config import STRING_API, STRING_SPECIES_NCBI_TAXON
 from salmo_omlas.ingest._util import dumps_metadata, now_iso
 
 
+def fetch_string_ids_tsv(
+    identifiers: list[str],
+    *,
+    species: int = STRING_SPECIES_NCBI_TAXON,
+) -> pd.DataFrame:
+    """Resolve gene/protein names to STRING identifiers."""
+    if not identifiers:
+        return pd.DataFrame()
+    joined = "%0d".join(identifiers)
+    url = f"{STRING_API}/tsv/get_string_ids"
+    params = {"identifiers": joined, "species": species, "echo_query": 1}
+    r = requests.get(url, params=params, timeout=180)
+    r.raise_for_status()
+    return pd.read_csv(io.StringIO(r.text), sep="\t")
+
+
 def fetch_network_tsv(
-    ensembl_ids: list[str],
+    string_ids: list[str],
     *,
     required_score: int = 400,
 ) -> pd.DataFrame:
     """Bulk network via STRING tsv/network endpoint."""
-    if not ensembl_ids:
+    if not string_ids:
         return pd.DataFrame()
-    joined = "%0d".join(ensembl_ids)
+    joined = "\r".join(string_ids)
     url = f"{STRING_API}/tsv/network"
-    params = {
+    data = {
         "identifiers": joined,
         "species": STRING_SPECIES_NCBI_TAXON,
         "required_score": required_score,
     }
-    r = requests.get(url, params=params, timeout=180)
+    r = requests.post(url, data=data, timeout=180)
     r.raise_for_status()
     return pd.read_csv(io.StringIO(r.text), sep="\t")
 
@@ -45,7 +62,12 @@ def load_interactions_for_genes(
     limit_genes: int | None = 500,
     required_score: int = 400,
 ) -> None:
-    """Add PPI-style edges between salmon genes using STRING."""
+    """Add PPI-style edges between salmon genes using STRING.
+
+    Notes:
+    - STRING's network endpoint expects identifiers it can resolve (often protein names/STRING ids).
+    - Ensembl *gene* IDs generally won't resolve directly, so we map via gene symbols first.
+    """
     cur = conn.cursor()
     cur.execute(
         "INSERT OR IGNORE INTO sources (name, version, url, downloaded_at) VALUES (?, ?, ?, ?)",
@@ -57,52 +79,74 @@ def load_interactions_for_genes(
         ("STRING",),
     ).fetchone()[0]
 
-    genes = cur.execute(
-        "SELECT ensembl_gene_id FROM genes WHERE biotype='protein_coding' LIMIT ?",
+    rows = cur.execute(
+        """
+        SELECT id, symbol
+        FROM genes
+        WHERE biotype='protein_coding' AND symbol IS NOT NULL AND symbol != ''
+        LIMIT ?
+        """,
         (limit_genes or 10_000_000,),
     ).fetchall()
-    ids = [g[0] for g in genes]
-    if not ids:
+    if not rows:
         return
 
-    gene_pk = dict(cur.execute("SELECT ensembl_gene_id, id FROM genes").fetchall())
+    gene_by_symbol = {str(sym).upper(): gid for gid, sym in rows if sym}
 
-    chunk = 50
-    for i in range(0, len(ids), chunk):
-        batch = ids[i : i + chunk]
+    symbols = [str(sym) for _gid, sym in rows if sym]
+
+    # Resolve symbols -> STRING ids (batched). Be polite to the API.
+    string_ids: list[str] = []
+    chunk = 200
+    for i in range(0, len(symbols), chunk):
+        batch = symbols[i : i + chunk]
+        try:
+            mapped = fetch_string_ids_tsv(batch)
+        except Exception:
+            continue
+        if not mapped.empty and "stringId" in mapped.columns:
+            string_ids.extend([str(x) for x in mapped["stringId"].dropna().tolist() if str(x)])
+        time.sleep(1)
+
+    # Fetch interactions among the mapped ids.
+    if not string_ids:
+        return
+
+    net_chunk = 50
+    for i in range(0, len(string_ids), net_chunk):
+        batch = string_ids[i : i + net_chunk]
         try:
             df = fetch_network_tsv(batch, required_score=required_score)
         except Exception:
             continue
         if df.empty:
             continue
-        # Typical columns: node1, node2, combined_score (or stringId_A / stringId_B)
+
         colmap = {c.lower(): c for c in df.columns}
-        c1 = colmap.get("node1") or colmap.get("stringid_a") or colmap.get("protein1")
-        c2 = colmap.get("node2") or colmap.get("stringid_b") or colmap.get("protein2")
-        sc = colmap.get("combined_score") or colmap.get("score")
-        if not c1 or not c2:
-            c1, c2 = df.columns[0], df.columns[1]
-        if sc is None and len(df.columns) > 2:
-            sc = df.columns[2]
+        a_name = colmap.get("preferredname_a")
+        b_name = colmap.get("preferredname_b")
+        sc = colmap.get("score") or colmap.get("combined_score")
+        if not a_name or not b_name:
+            continue
+
         for _, row in df.iterrows():
-            id_a = _strip_taxon(row[c1])
-            id_b = _strip_taxon(row[c2])
+            sa = str(row[a_name]).upper()
+            sb = str(row[b_name]).upper()
+            if sa not in gene_by_symbol or sb not in gene_by_symbol:
+                continue
             try:
-                score = float(row[sc]) / 1000.0 if sc is not None else None
+                score = float(row[sc]) if sc is not None else None
             except (TypeError, ValueError):
                 score = None
-            if id_a not in gene_pk or id_b not in gene_pk:
-                continue
             cur.execute(
                 """INSERT OR REPLACE INTO interactions (
                      regulator_gene_id, regulator_element_id, target_gene_id,
                      interaction_type, evidence_score, direction, metadata, source_id
                    ) VALUES (?,?,?,?,?,?,?,?)""",
                 (
-                    gene_pk[id_a],
+                    gene_by_symbol[sa],
                     None,
-                    gene_pk[id_b],
+                    gene_by_symbol[sb],
                     "ppi",
                     score,
                     "associated",
@@ -110,4 +154,6 @@ def load_interactions_for_genes(
                     sid,
                 ),
             )
+        conn.commit()
+        time.sleep(1)
     conn.commit()

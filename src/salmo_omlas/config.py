@@ -35,7 +35,9 @@ STRING_API = "https://string-db.org/api"
 STRING_SPECIES_NCBI_TAXON = 8030  # Salmo salar
 
 # miRBase
-MIRBASE_FTP_GFF3 = "https://www.mirbase.org/download/CURRENT/genomes/ssa.gff3"
+# miRBase (FASTA). Genome-coordinate GFF3 for salmon is not available here,
+# so ingestion stores miRNAs without genomic coordinates.
+MIRBASE_MATURE_FASTA = "https://www.mirbase.org/download/mature.fa"
 
 # Immune-focused GO roots (optional filter)
 IMMUNE_GO_ROOTS = (

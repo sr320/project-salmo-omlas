@@ -2,39 +2,32 @@
 
 from __future__ import annotations
 
+import io
 import re
 import sqlite3
 
 import requests
 
-from salmo_omlas.config import MIRBASE_FTP_GFF3
+from salmo_omlas.config import MIRBASE_MATURE_FASTA
 from salmo_omlas.ingest._util import dumps_metadata, now_iso
 
 
-def _parse_gff_attributes(attr: str) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for part in attr.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        if "=" in part:
-            k, v = part.split("=", 1)
-            out[k.strip()] = v.strip()
-    return out
-
-
-def fetch_mirbase_gff_text() -> str:
-    r = requests.get(MIRBASE_FTP_GFF3, timeout=120)
+def fetch_mirbase_mature_fasta() -> str:
+    r = requests.get(MIRBASE_MATURE_FASTA, timeout=180)
     r.raise_for_status()
     return r.text
 
 
 def load_mirna_features(conn: sqlite3.Connection) -> int:
-    """Parse miRBase ssa.gff3 for pre-miRNA / miRNA loci."""
+    """Load miRBase mature miRNAs (FASTA) for Salmo salar (ssa-).
+
+    miRBase does not consistently provide genome-coordinate GFF3 for salmon,
+    so these are stored as regulatory elements without genomic coordinates.
+    """
     cur = conn.cursor()
     cur.execute(
         "INSERT OR IGNORE INTO sources (name, version, url, downloaded_at) VALUES (?, ?, ?, ?)",
-        ("miRBase", "CURRENT", MIRBASE_FTP_GFF3, now_iso()),
+        ("miRBase", "CURRENT", MIRBASE_MATURE_FASTA, now_iso()),
     )
     conn.commit()
     sid = cur.execute(
@@ -43,22 +36,27 @@ def load_mirna_features(conn: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
     try:
-        text = fetch_mirbase_gff_text()
+        fasta = fetch_mirbase_mature_fasta()
     except Exception:
         return 0
 
     n = 0
-    for line in text.splitlines():
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        if len(parts) < 9:
-            continue
-        chrom, _src, ftype, start, end, _score, strand, _phase, attrs = parts[:9]
-        if ftype not in ("miRNA", "miRNA_primary_transcript"):
-            continue
-        a = _parse_gff_attributes(attrs)
-        name = a.get("Name") or a.get("ID") or f"mir_{start}_{end}"
+    name: str | None = None
+    seq_parts: list[str] = []
+
+    def flush() -> None:
+        nonlocal n, name, seq_parts
+        if not name:
+            return
+        if not name.lower().startswith("ssa-"):
+            name = None
+            seq_parts = []
+            return
+        seq = "".join(seq_parts).strip().upper()
+        if not seq:
+            name = None
+            seq_parts = []
+            return
         eid = f"mirbase_{name}"
         cur.execute(
             """INSERT OR IGNORE INTO regulatory_elements (
@@ -68,17 +66,32 @@ def load_mirna_features(conn: sqlite3.Connection) -> int:
             (
                 eid,
                 "mirna",
-                chrom,
-                int(start),
-                int(end),
-                1 if strand == "+" else -1,
+                None,
+                None,
+                None,
+                None,
                 None,
                 name,
-                dumps_metadata({"gff_type": ftype, "attrs": a}),
+                dumps_metadata({"sequence": seq, "length": len(seq), "kind": "mature_fasta"}),
                 sid,
             ),
         )
         n += 1
+        name = None
+        seq_parts = []
+
+    for line in io.StringIO(fasta):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            flush()
+            # Take first token after '>' as miRNA id (e.g., ssa-miR-...)
+            name = line[1:].split(None, 1)[0]
+            continue
+        seq_parts.append(line)
+
+    flush()
     conn.commit()
     return n
 
